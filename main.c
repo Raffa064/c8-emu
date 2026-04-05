@@ -32,7 +32,7 @@ char SPRITES[16 * 5] = {
   0xF0, 0x80, 0xF0, 0x80, 0x80  //F
 };
 
-#define PROGRAM_START_ADDR 0x200 // 512
+#define PROGRAM_START_ADDR 0x200 // PC register whould start at 0x200 (512)
 #define MEMORY_BUFFER_SIZE 4096
 #define DISPLAY_WIDTH 64
 #define DISPLAY_HEIGHT 32
@@ -53,6 +53,7 @@ typedef struct {
   GC gc;
   XImage *canvas;
   uint32_t *canvas_data;
+  KeySym keymap[16];
 } X11Backend;
 
 typedef struct {
@@ -61,13 +62,8 @@ typedef struct {
 
 typedef struct {
   uint8_t last;
-  union {
-    uint16_t keys;
-    struct { uint16_t K_0:1, K_1:1, K_2:1, K_3:1, K_4:1, K_5:1, K_6:1, K_7:1, K_8:1, K_9:1, K_A:1, K_B:1, K_C:1, K_D:1, K_E:1, K_F:1; };
-  };
+  uint16_t keys;
 } Keyboard;
-
-const KeySym KEYMAP[16] = { XK_0, XK_1, XK_2, XK_3, XK_4, XK_5, XK_6, XK_7, XK_8, XK_9, XK_a, XK_b, XK_c, XK_d, XK_e, XK_f };
 
 typedef struct {
   R16 PC;
@@ -88,8 +84,6 @@ typedef struct {
   Memory mem;
   CPU cpu;
 } C8Emu;
-
-// PC whould start at 0x200 (512)
 
 void c8_init_backend(C8Emu *c8) { 
   Display *display = XOpenDisplay(NULL);
@@ -124,7 +118,8 @@ void c8_init_backend(C8Emu *c8) {
     .window = window,
     .gc = gc,
     .canvas = canvas,
-    .canvas_data = canvas_data
+    .canvas_data = canvas_data,
+    .keymap = { XK_0, XK_1, XK_2, XK_3, XK_4, XK_5, XK_6, XK_7, XK_8, XK_9, XK_a, XK_b, XK_c, XK_d, XK_e, XK_f }
   };
 }
 
@@ -137,7 +132,7 @@ void c8_backend_pool_events(C8Emu *c8) {
       case KeyPress: {
         KeySym key = XLookupKeysym(&ev.xkey, 0);
         for (uint8_t  i = 0; i < 16; i++) {
-          if (KEYMAP[i] == key) {
+          if (c8->backend.keymap[i] == key) {
             c8->keybord.keys |= 1 << i;
             c8->keybord.last = i;
             break;
@@ -147,7 +142,7 @@ void c8_backend_pool_events(C8Emu *c8) {
       case KeyRelease: {
         KeySym key = XLookupKeysym(&ev.xkey, 0);
         for (uint8_t  i = 0; i < 16; i++) {
-          if (KEYMAP[i] == key) {
+          if (c8->backend.keymap[i] == key) {
             c8->keybord.keys ^= 1 << i;
             break;
           }
@@ -191,6 +186,7 @@ void c8_backend_draw(C8Emu *c8) {
   );
 }
 
+// Read 16bit from memory address (big endian)
 uint16_t read_16(Memory mem, uint16_t addr) { 
   uint16_t word = mem[addr];
   word <<= 8;
@@ -199,6 +195,7 @@ uint16_t read_16(Memory mem, uint16_t addr) {
   return word;
 }
 
+// Load buffer into memory
 void ldbuf(Memory mem, uint16_t addr, const char *buf, size_t length) {
   for (size_t i = 0; i < length; ++i)
     mem[addr + i] = buf[i];
@@ -206,8 +203,12 @@ void ldbuf(Memory mem, uint16_t addr, const char *buf, size_t length) {
   printf("ldbuf from %d to %zu\n", addr, addr + length);
 }
 
+uint16_t c8_inst(C8Emu *c8) {
+  return read_16(c8->mem, c8->cpu.PC);
+}
+
 void c8_invalid_ins(C8Emu *c8) {
-  fprintf(stderr, "Invalid instruction at %d\n", c8->cpu.PC);
+  fprintf(stderr, "Invalid instruction at %d: %04x\n", c8->cpu.PC, c8_inst(c8));
   exit(1);
 }
 
@@ -224,7 +225,7 @@ void c8_cycle(C8Emu *c8) {
     00kk    kk or byte - An 8-bit value, the lowest 8 bits of the instruction
   */
 
-  uint16_t inst = read_16(c8->mem, c8->cpu.PC);
+  uint16_t inst = c8_inst(c8);
   uint16_t nnn = inst & 0xFFF;
   uint8_t n = inst & 0xF;
   uint8_t x = (inst >> 8) & 0xF;
@@ -407,7 +408,6 @@ void c8_cycle(C8Emu *c8) {
         default: c8_invalid_ins(c8);
       };
     } break;
-    
     default: c8_invalid_ins(c8);
   }
 
@@ -443,7 +443,7 @@ void c8_mem_dump(C8Emu *c8) {
   printf("\n");
 }
 
-void c8_init(C8Emu *c8, const char *rom_path) {
+void c8_init(C8Emu *c8) {
   c8_init_backend(c8);
 
   // Reset CPU state
@@ -453,32 +453,51 @@ void c8_init(C8Emu *c8, const char *rom_path) {
 
   // Load sprites into memory
   ldbuf(c8->mem, SPRITES_LOCATION_ADDR, SPRITES, sizeof(SPRITES));
- 
+};
+
+void c8_load_rom(C8Emu *c8, const char *rom_path) {
   FILE *f = fopen(rom_path, "rb");
+
+  if (!f) {
+    fprintf(stderr, "Can't load rom file from '%s'\n", rom_path);
+    exit(1);
+  }
 
   fseek(f, 0, SEEK_END);
   size_t file_size = ftell(f);
   rewind(f);
 
   char *buf = malloc(file_size);
-  fread(buf, 1, file_size, f);
-  ldbuf(c8->mem, PROGRAM_START_ADDR, buf, file_size);
-  free(buf);
+  
+  size_t total = 0;
+  while (total < file_size) {
+    size_t bytes = fread(buf, 1, file_size - total, f);
 
-  c8_mem_dump(c8);
+    if (bytes == 0)
+      break;
 
-  while (1) {
-    c8_backend_pool_events(c8);
-    c8_cycle(c8);
-    c8_backend_draw(c8);
+    total += bytes;
   }
-};
+  
+  ldbuf(c8->mem, PROGRAM_START_ADDR, buf, total);
+  free(buf);
+  fclose(f);
+}
 
 int main(int argc, char **argv) {
-  const char *path = argv[1];
+  const char *rom_path = argv[1];
 
   C8Emu c8 = {0};
-  c8_init(&c8, path);
+  c8_init(&c8);
+
+  c8_load_rom(&c8, rom_path);
+  c8_mem_dump(&c8);
+
+  while (1) {
+    c8_backend_pool_events(&c8);
+    c8_cycle(&c8);
+    c8_backend_draw(&c8);
+  }
 
   return 0;
 }
