@@ -1,6 +1,7 @@
 #include <X11/X.h>
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
+#include <bits/time.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -9,6 +10,7 @@
 #include <time.h>
 #include <assert.h>
 #include <stdbool.h>
+#include <unistd.h>
 
 #define SPRITES_LOCATION_ADDR 0
 #define SPRITE_SIZE 5
@@ -79,11 +81,21 @@ typedef struct {
 } CPU;
 
 typedef struct {
+  long start;
+  short freq; // Hz
+  bool tick;
+} Clock;
+
+typedef struct {
   X11Backend backend;
   Monitor monitor;
   Keyboard keybord;
   Memory mem;
   CPU cpu;
+  struct {
+    Clock cpu; 
+    Clock timers;
+  } clock;
 } C8Emu;
 
 void c8_init_backend(C8Emu *c8) { 
@@ -410,7 +422,9 @@ void c8_cycle(C8Emu *c8) {
   }
 
   c8->cpu.PC = next_PC;
+}
 
+void c8_update_timers(C8Emu *c8) {
   if (c8->cpu.DT > 0)
     c8->cpu.DT--;
 
@@ -449,6 +463,9 @@ void c8_init(C8Emu *c8) {
   c8->cpu = (CPU) {0};
   c8->cpu.PC = PROGRAM_START_ADDR;
 
+  c8->clock.cpu.freq = 700; // Hz
+  c8->clock.timers.freq = 60; // Hz
+  
   // Load sprites into memory
   ldbuf(c8->mem, SPRITES_LOCATION_ADDR, SPRITES, sizeof(SPRITES));
 };
@@ -482,6 +499,30 @@ void c8_load_rom(C8Emu *c8, const char *rom_path) {
   fclose(f);
 }
 
+long getns(struct timespec ts) {
+  return ts.tv_sec * 1e9 + ts.tv_nsec;
+}
+
+void c8_tick(long now, Clock *clock) {
+  long elapsed = now - clock->start;
+  long target = 1e9 / clock->freq;
+
+  clock->tick = 0;
+  if (elapsed >= target) {
+    clock->tick = 1;
+    clock->start = now;
+  }
+}
+
+void c8_update_clock(C8Emu *c8) {
+  struct timespec now_spec = {0};
+  clock_gettime(CLOCK_MONOTONIC, &now_spec);
+  
+  long now = getns(now_spec);
+  c8_tick(now, &c8->clock.cpu);
+  c8_tick(now, &c8->clock.timers);
+}
+
 int main(int argc, char **argv) {
   const char *rom_path = argv[1];
 
@@ -492,8 +533,15 @@ int main(int argc, char **argv) {
   c8_mem_dump(&c8);
 
   while (1) {
+    c8_update_clock(&c8);
     c8_backend_pool_events(&c8);
-    c8_cycle(&c8);
+    
+    if (c8.clock.cpu.tick)
+      c8_cycle(&c8);
+
+    if (c8.clock.timers.tick) 
+      c8_update_timers(&c8);
+    
     c8_backend_draw(&c8);
   }
 
