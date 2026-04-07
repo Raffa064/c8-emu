@@ -40,11 +40,6 @@ char SPRITES[16 * 5] = {
 #define DISPLAY_HEIGHT 32
 #define DISPLAY_BUFFER_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT)
 
-#define SCALE 16
-#define CANVAS_WIDTH (DISPLAY_WIDTH * SCALE)
-#define CANVAS_HEIGHT (DISPLAY_HEIGHT * SCALE)
-#define CANVAS_BUFFER_SIZE (CANVAS_WIDTH * CANVAS_HEIGHT)
-
 typedef uint8_t Memory[MEMORY_BUFFER_SIZE];
 typedef uint8_t R8;
 typedef uint16_t R16;
@@ -87,6 +82,15 @@ typedef struct {
 } Clock;
 
 typedef struct {
+  struct {
+    int scale, width, height, buffer_size;
+  } canvas;
+  short cpu_freq, timers_freq;
+  const char *rom_path;
+} C8Params;
+
+typedef struct {
+  C8Params params;
   X11Backend backend;
   Monitor monitor;
   Keyboard keybord;
@@ -100,14 +104,22 @@ typedef struct {
 
 void c8_init_backend(C8Emu *c8) { 
   Display *display = XOpenDisplay(NULL);
-  Window window = XCreateSimpleWindow(display, XDefaultRootWindow(display), 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, 0, 0, 0);
+  Window window = XCreateSimpleWindow(
+    display, 
+    XDefaultRootWindow(display), 
+    0, 0, 
+    c8->params.canvas.width, 
+    c8->params.canvas.height,
+    0, 0, 0
+  );
+  
   GC gc = XCreateGC(display, window, 0, NULL);
   
   XSelectInput(display, window, KeyPressMask | KeyReleaseMask);
   XMapWindow(display, window);
 
-  uint32_t *canvas_data = malloc(CANVAS_BUFFER_SIZE * sizeof(uint32_t));
-  int bytes_per_line = CANVAS_WIDTH * sizeof(uint32_t);
+  uint32_t *canvas_data = malloc(c8->params.canvas.buffer_size * sizeof(uint32_t));
+  int bytes_per_line = c8->params.canvas.width * sizeof(uint32_t);
 
   int screen = XDefaultScreen(display);
   XImage *canvas = XCreateImage(
@@ -117,14 +129,14 @@ void c8_init_backend(C8Emu *c8) {
     ZPixmap, 
     0, 
     (void*)canvas_data, 
-    CANVAS_WIDTH, 
-    CANVAS_HEIGHT, 
+    c8->params.canvas.width, 
+    c8->params.canvas.height, 
     32, 
     bytes_per_line
   );
   
   int bytes_per_pixel = canvas->bits_per_pixel/8;
-  canvas->bytes_per_line = CANVAS_WIDTH * bytes_per_pixel;
+  canvas->bytes_per_line = c8->params.canvas.width * bytes_per_pixel;
 
   c8->backend = (X11Backend) {
     .display = display,
@@ -175,10 +187,10 @@ void c8_backend_draw(C8Emu *c8) {
       uint8_t pixel = c8->monitor.display[x + y * DISPLAY_WIDTH];
       uint32_t color = pixel? 0xFFFFFFFF : 0x00000000;
       
-      int px_tl_corner = (x + y * CANVAS_WIDTH) * SCALE;
-      for (int i = 0; i < SCALE; i++)
-        for (int j = 0; j < SCALE; j++)
-          c8->backend.canvas_data[px_tl_corner + i + j * CANVAS_WIDTH] = color;
+      int px_tl_corner = (x + y * c8->params.canvas.width) * c8->params.canvas.scale;
+      for (int i = 0; i < c8->params.canvas.scale; i++)
+        for (int j = 0; j < c8->params.canvas.scale; j++)
+          c8->backend.canvas_data[px_tl_corner + i + j * c8->params.canvas.width] = color;
     }
   }
   
@@ -188,7 +200,9 @@ void c8_backend_draw(C8Emu *c8) {
     c8->backend.gc, 
     c8->backend.canvas,
     0, 0, 
-    0, 0, CANVAS_WIDTH, CANVAS_HEIGHT
+    0, 0,
+    c8->params.canvas.width,
+    c8->params.canvas.height
   );
 
   c8->monitor.redraw = 0;
@@ -455,19 +469,22 @@ void c8_mem_dump(C8Emu *c8) {
   printf("\n");
 }
 
-void c8_init(C8Emu *c8) {
-  c8_init_backend(c8);
+C8Emu c8_init(C8Params params) {
+  C8Emu c8 = { .params = params };
+  c8_init_backend(&c8);
 
   // Reset CPU state
   srand(time(NULL));
-  c8->cpu = (CPU) {0};
-  c8->cpu.PC = PROGRAM_START_ADDR;
+  c8.cpu = (CPU) {0};
+  c8.cpu.PC = PROGRAM_START_ADDR;
 
-  c8->clock.cpu.freq = 700; // Hz
-  c8->clock.timers.freq = 60; // Hz
+  c8.clock.cpu.freq = params.cpu_freq;
+  c8.clock.timers.freq = params.timers_freq;
   
   // Load sprites into memory
-  ldbuf(c8->mem, SPRITES_LOCATION_ADDR, SPRITES, sizeof(SPRITES));
+  ldbuf(c8.mem, SPRITES_LOCATION_ADDR, SPRITES, sizeof(SPRITES));
+
+  return c8;
 };
 
 void c8_load_rom(C8Emu *c8, const char *rom_path) {
@@ -523,13 +540,43 @@ void c8_update_clock(C8Emu *c8) {
   c8_tick(now, &c8->clock.timers);
 }
 
+bool match_opt(const char *arg, const char *option) {
+  return strcmp(arg, option) == 0;
+}
+
+C8Params c8_parse_params(int argc, char **argv) {
+  C8Params params = {
+    .canvas.scale = 10,
+    .rom_path = argv[argc - 1],
+    .cpu_freq = 700,
+    .timers_freq = 60,
+  };
+
+  // c8 [params, ...] rom.ch8
+  for (int i = 1; i < argc - 1; ++i) {
+    char *opt = argv[i];
+      const char *v = argv[++i];
+    if (match_opt(opt, "-s")) {
+      params.canvas.scale = strtol(v, NULL, 10);
+    } else if (match_opt(opt, "-c")) {
+      params.cpu_freq = strtol(v, NULL, 10);
+    } else if (match_opt(opt, "-t")) {
+      params.timers_freq = strtol(v, NULL, 10);
+    }
+  }
+
+  params.canvas.width = DISPLAY_WIDTH * params.canvas.scale;
+  params.canvas.height = DISPLAY_HEIGHT * params.canvas.scale;
+  params.canvas.buffer_size = params.canvas.width * params.canvas.height;
+
+  return params;
+}
+
 int main(int argc, char **argv) {
-  const char *rom_path = argv[1];
+  C8Params params = c8_parse_params(argc, argv);
+  C8Emu c8 = c8_init(params);
 
-  C8Emu c8 = {0};
-  c8_init(&c8);
-
-  c8_load_rom(&c8, rom_path);
+  c8_load_rom(&c8, params.rom_path);
   c8_mem_dump(&c8);
 
   while (1) {
