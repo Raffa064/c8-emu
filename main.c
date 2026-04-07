@@ -38,7 +38,7 @@ char SPRITES[16 * 5] = {
 #define DISPLAY_HEIGHT 32
 #define DISPLAY_BUFFER_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT)
 
-#define SCALE 8
+#define SCALE 16
 #define CANVAS_WIDTH (DISPLAY_WIDTH * SCALE)
 #define CANVAS_HEIGHT (DISPLAY_HEIGHT * SCALE)
 #define CANVAS_BUFFER_SIZE (CANVAS_WIDTH * CANVAS_HEIGHT)
@@ -58,6 +58,7 @@ typedef struct {
 
 typedef struct {
   uint8_t display[DISPLAY_BUFFER_SIZE];
+  bool redraw;
 } Monitor;
 
 typedef struct {
@@ -143,7 +144,7 @@ void c8_backend_pool_events(C8Emu *c8) {
         KeySym key = XLookupKeysym(&ev.xkey, 0);
         for (uint8_t  i = 0; i < 16; i++) {
           if (c8->backend.keymap[i] == key) {
-            c8->keybord.keys ^= 1 << i;
+            c8->keybord.keys &= ~(1 << i);
             break;
           }
         }
@@ -154,26 +155,19 @@ void c8_backend_pool_events(C8Emu *c8) {
 }
 
 void c8_backend_draw(C8Emu *c8) {
+  if (!c8->monitor.redraw)
+    return;
+  
   for (int y = 0; y < DISPLAY_HEIGHT; ++y) {
     for (int x = 0; x < DISPLAY_WIDTH; ++x) {
       uint8_t pixel = c8->monitor.display[x + y * DISPLAY_WIDTH];
+      uint32_t color = pixel? 0xFFFFFFFF : 0x00000000;
       
       int px_tl_corner = (x + y * CANVAS_WIDTH) * SCALE;
       for (int i = 0; i < SCALE; i++)
         for (int j = 0; j < SCALE; j++)
-          c8->backend.canvas_data[px_tl_corner + i + j * CANVAS_WIDTH] = pixel? 0xFFFFFFFF : 0x00000000;
+          c8->backend.canvas_data[px_tl_corner + i + j * CANVAS_WIDTH] = color;
     }
-  }
-
-  int n = 10;
-  for (int i = 0; i < n; i++) {
-    for (int j = 0; j < n; j++)
-      c8->backend.canvas_data[10 + 10 * CANVAS_WIDTH + i + j * CANVAS_WIDTH] = c8->cpu.ST > 0 ?  0x0000FF : 0x0;
-  }
-
-  for (int i = 0; i < n; i++) {
-    for (int j = 0; j < n; j++)
-      c8->backend.canvas_data[30 + 10 * CANVAS_WIDTH + i + j * CANVAS_WIDTH] = c8->cpu.DT > 0 ?  0xFF00FF : 0x0;
   }
   
   XPutImage(
@@ -184,6 +178,8 @@ void c8_backend_draw(C8Emu *c8) {
     0, 0, 
     0, 0, CANVAS_WIDTH, CANVAS_HEIGHT
   );
+
+  c8->monitor.redraw = 0;
 }
 
 // Read 16bit from memory address (big endian)
@@ -354,6 +350,8 @@ void c8_cycle(C8Emu *c8) {
           }
         }
       }
+
+      c8->monitor.redraw = 1;
     } break;
     case 0xE: {
       switch (kk) {
