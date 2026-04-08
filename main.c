@@ -327,7 +327,7 @@ uint16_t c8_inst(C8Emu *c8) {
 }
 
 void c8_invalid_ins(C8Emu *c8) {
-  fprintf(stderr, "Invalid instruction at %d: %04x\n", c8->cpu.PC, c8_inst(c8));
+  fprintf(stderr, "Error: Invalid instruction at %d: %04x\n", c8->cpu.PC, c8_inst(c8));
   exit(1);
 }
 
@@ -641,7 +641,23 @@ bool match_opt(const char *arg, const char *option) {
   return strcmp(arg, option) == 0;
 }
 
+void c8_print_usage() {
+  printf(
+    "c8 [options, ...] <rom_path.ch8>\n"
+    "  -s <scale>  Set canvas scale (df: 10)\n"
+    "  -c <freq>   Change CPU's freq (df: 700)\n"
+    "  -t <freq>   Change sound/delay timer's freq (df: 60)\n"
+    "  -h          Show this help dialog\n"
+  );
+}
+
 C8Params c8_parse_params(int argc, char **argv) {
+  if (argc < 2) {
+      c8_print_usage();
+      fprintf(stderr, "Error: no arguments\n");
+      exit(1);
+  }
+
   C8Params params = {
     .canvas.scale = 10,
     .rom_path = argv[argc - 1],
@@ -659,10 +675,17 @@ C8Params c8_parse_params(int argc, char **argv) {
       params.cpu_freq = strtol(v, NULL, 10);
     } else if (match_opt(opt, "-t")) {
       params.timers_freq = strtol(v, NULL, 10);
+    } else if (match_opt(opt, "-h")) {
+      c8_print_usage();
+      exit(0);
+    } else {
+      c8_print_usage();
+      fprintf(stderr, "Error: Invalid option: %s\n", opt);
+      exit(1);
     }
   }
 
-  params.canvas.width = DISPLAY_WIDTH * params.canvas.scale;
+  params.canvas.width  = DISPLAY_WIDTH  * params.canvas.scale;
   params.canvas.height = DISPLAY_HEIGHT * params.canvas.scale;
   params.canvas.buffer_size = params.canvas.width * params.canvas.height;
 
