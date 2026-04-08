@@ -1,6 +1,3 @@
-#include <X11/X.h>
-#include <X11/Xlib.h>
-#include <X11/keysym.h>
 #include <bits/time.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -11,6 +8,14 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <unistd.h>
+
+#ifdef RL_BACKEND
+#include <raylib.h>
+#else
+#include <X11/X.h>
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+#endif
 
 #define SPRITES_LOCATION_ADDR 0
 #define SPRITE_SIZE 5
@@ -44,6 +49,11 @@ typedef uint8_t Memory[MEMORY_BUFFER_SIZE];
 typedef uint8_t R8;
 typedef uint16_t R16;
 
+#ifdef RL_BACKEND
+typedef struct {
+  KeyboardKey keymap[16];
+} RLBackend;
+#else
 typedef struct {
   Display *display;
   Window window;
@@ -52,6 +62,7 @@ typedef struct {
   uint32_t *canvas_data;
   KeySym keymap[16];
 } X11Backend;
+#endif
 
 typedef struct {
   uint8_t display[DISPLAY_BUFFER_SIZE];
@@ -90,8 +101,13 @@ typedef struct {
 } C8Params;
 
 typedef struct {
-  C8Params params;
+  #ifdef RL_BACKEND
+  RLBackend backend;
+  #else
   X11Backend backend;
+  #endif
+
+  C8Params params;
   Monitor monitor;
   Keyboard keybord;
   Memory mem;
@@ -100,8 +116,88 @@ typedef struct {
     Clock cpu; 
     Clock timers;
   } clock;
+  bool should_close;
 } C8Emu;
 
+#ifdef RL_BACKEND
+void c8_init_backend(C8Emu *c8) { 
+  InitWindow(c8->params.canvas.width, c8->params.canvas.height, c8->params.rom_path);
+  c8->backend = (RLBackend) {
+    .keymap = { KEY_ZERO, KEY_ONE, KEY_TWO, KEY_THREE, KEY_FOUR, KEY_FIVE, KEY_SIX, KEY_SEVEN, KEY_EIGHT, KEY_NINE, KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F }
+  };
+}
+
+void c8_backend_pool_events(C8Emu *c8) {
+  if (WindowShouldClose()) {
+    c8->should_close = 1;
+    return;
+  }
+
+  for (int i = 0; i < 16; ++i) {
+    KeyboardKey key = c8->backend.keymap[i];
+    if (IsKeyPressed(key)) {
+      c8->keybord.keys |= 1 << i;
+      c8->keybord.last = i;
+    }
+
+    if (IsKeyReleased(key)) {
+      c8->keybord.keys &= ~(1 << i);
+    }
+  }
+
+  // XEvent ev;
+  // while (XPending(c8->backend.display)) {
+  //   XNextEvent(c8->backend.display, &ev);
+
+  //   switch (ev.type) {
+  //     case KeyPress: {
+  //       KeySym key = XLookupKeysym(&ev.xkey, 0);
+  //       for (uint8_t  i = 0; i < 16; i++) {
+  //         if (c8->backend.keymap[i] == key) {
+  //           c8->keybord.keys |= 1 << i;
+  //           c8->keybord.last = i;
+  //           break;
+  //         }
+  //       }
+  //     } break;
+  //     case KeyRelease: {
+  //       KeySym key = XLookupKeysym(&ev.xkey, 0);
+  //       for (uint8_t  i = 0; i < 16; i++) {
+  //         if (c8->backend.keymap[i] == key) {
+  //           c8->keybord.keys &= ~(1 << i);
+  //           break;
+  //         }
+  //       }
+  //     } break;
+
+  //   }
+  // }
+}
+
+void c8_backend_draw(C8Emu *c8) {
+  if (!c8->monitor.redraw)
+    return;
+ 
+  ClearBackground(BLACK);
+  BeginDrawing();
+  int scale = c8->params.canvas.scale;
+  for (int y = 0; y < DISPLAY_HEIGHT; ++y) {
+    for (int x = 0; x < DISPLAY_WIDTH; ++x) {
+      uint8_t pixel = c8->monitor.display[x + y * DISPLAY_WIDTH];
+      DrawRectangle(
+        x * scale, 
+        y * scale, 
+        scale, 
+        scale, 
+        pixel? WHITE : BLACK
+      );
+    }
+  }
+  EndDrawing();
+  
+  c8->monitor.redraw = 0;
+}
+#else
 void c8_init_backend(C8Emu *c8) { 
   Display *display = XOpenDisplay(NULL);
   Window window = XCreateSimpleWindow(
@@ -116,6 +212,7 @@ void c8_init_backend(C8Emu *c8) {
   GC gc = XCreateGC(display, window, 0, NULL);
   
   XSelectInput(display, window, KeyPressMask | KeyReleaseMask);
+  XStoreName(display, window, c8->params.rom_path);
   XMapWindow(display, window);
 
   uint32_t *canvas_data = malloc(c8->params.canvas.buffer_size * sizeof(uint32_t));
@@ -173,7 +270,6 @@ void c8_backend_pool_events(C8Emu *c8) {
           }
         }
       } break;
-
     }
   }
 }
@@ -207,6 +303,7 @@ void c8_backend_draw(C8Emu *c8) {
 
   c8->monitor.redraw = 0;
 }
+#endif
 
 // Read 16bit from memory address (big endian)
 uint16_t read_16(Memory mem, uint16_t addr) { 
@@ -572,25 +669,28 @@ C8Params c8_parse_params(int argc, char **argv) {
   return params;
 }
 
+void c8_run(C8Emu *c8) {
+  while (!c8->should_close) {
+    c8_update_clock(c8);
+    c8_backend_pool_events(c8);
+    
+    if (c8->clock.cpu.tick)
+      c8_cycle(c8);
+
+    if (c8->clock.timers.tick) 
+      c8_update_timers(c8);
+    
+    c8_backend_draw(c8);
+  }
+}
+
 int main(int argc, char **argv) {
   C8Params params = c8_parse_params(argc, argv);
   C8Emu c8 = c8_init(params);
 
   c8_load_rom(&c8, params.rom_path);
   c8_mem_dump(&c8);
-
-  while (1) {
-    c8_update_clock(&c8);
-    c8_backend_pool_events(&c8);
-    
-    if (c8.clock.cpu.tick)
-      c8_cycle(&c8);
-
-    if (c8.clock.timers.tick) 
-      c8_update_timers(&c8);
-    
-    c8_backend_draw(&c8);
-  }
-
+  c8_run(&c8);
+  
   return 0;
 }
