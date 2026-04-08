@@ -66,7 +66,6 @@ typedef struct {
 
 typedef struct {
   uint8_t display[DISPLAY_BUFFER_SIZE];
-  bool redraw;
 } Monitor;
 
 typedef struct {
@@ -96,8 +95,11 @@ typedef struct {
   struct {
     int scale, width, height, buffer_size;
   } canvas;
-  short cpu_freq, timers_freq;
+  short cpu_freq, timers_freq, display_freq;
   const char *rom_path;
+  struct {
+    uint32_t black, white;
+  } pixel;
 } C8Params;
 
 typedef struct {
@@ -115,6 +117,7 @@ typedef struct {
   struct {
     Clock cpu; 
     Clock timers;
+    Clock display;
   } clock;
   bool should_close;
 } C8Emu;
@@ -144,58 +147,28 @@ void c8_backend_pool_events(C8Emu *c8) {
       c8->keybord.keys &= ~(1 << i);
     }
   }
-
-  // XEvent ev;
-  // while (XPending(c8->backend.display)) {
-  //   XNextEvent(c8->backend.display, &ev);
-
-  //   switch (ev.type) {
-  //     case KeyPress: {
-  //       KeySym key = XLookupKeysym(&ev.xkey, 0);
-  //       for (uint8_t  i = 0; i < 16; i++) {
-  //         if (c8->backend.keymap[i] == key) {
-  //           c8->keybord.keys |= 1 << i;
-  //           c8->keybord.last = i;
-  //           break;
-  //         }
-  //       }
-  //     } break;
-  //     case KeyRelease: {
-  //       KeySym key = XLookupKeysym(&ev.xkey, 0);
-  //       for (uint8_t  i = 0; i < 16; i++) {
-  //         if (c8->backend.keymap[i] == key) {
-  //           c8->keybord.keys &= ~(1 << i);
-  //           break;
-  //         }
-  //       }
-  //     } break;
-
-  //   }
-  // }
 }
 
 void c8_backend_draw(C8Emu *c8) {
-  if (!c8->monitor.redraw)
-    return;
- 
   ClearBackground(BLACK);
   BeginDrawing();
   int scale = c8->params.canvas.scale;
   for (int y = 0; y < DISPLAY_HEIGHT; ++y) {
     for (int x = 0; x < DISPLAY_WIDTH; ++x) {
       uint8_t pixel = c8->monitor.display[x + y * DISPLAY_WIDTH];
+      uint32_t argb = pixel? c8->params.pixel.white : c8->params.pixel.black;
+      uint32_t color = argb << 8 | 0xFF; // Conert to Raylib pixel format (RGBA)
+
       DrawRectangle(
         x * scale, 
         y * scale, 
         scale, 
         scale, 
-        pixel? WHITE : BLACK
+        GetColor(color)
       );
     }
   }
-  EndDrawing();
-  
-  c8->monitor.redraw = 0;
+  EndDrawing();  
 }
 #else
 void c8_init_backend(C8Emu *c8) { 
@@ -275,13 +248,10 @@ void c8_backend_pool_events(C8Emu *c8) {
 }
 
 void c8_backend_draw(C8Emu *c8) {
-  if (!c8->monitor.redraw)
-    return;
-  
   for (int y = 0; y < DISPLAY_HEIGHT; ++y) {
     for (int x = 0; x < DISPLAY_WIDTH; ++x) {
       uint8_t pixel = c8->monitor.display[x + y * DISPLAY_WIDTH];
-      uint32_t color = pixel? 0xFFFFFFFF : 0x00000000;
+      uint32_t color = pixel? c8->params.pixel.white : c8->params.pixel.black;
       
       int px_tl_corner = (x + y * c8->params.canvas.width) * c8->params.canvas.scale;
       for (int i = 0; i < c8->params.canvas.scale; i++)
@@ -300,8 +270,6 @@ void c8_backend_draw(C8Emu *c8) {
     c8->params.canvas.width,
     c8->params.canvas.height
   );
-
-  c8->monitor.redraw = 0;
 }
 #endif
 
@@ -441,7 +409,7 @@ void c8_cycle(C8Emu *c8) {
     case 0xC: // RND Vx, byte
       c8->cpu.V[x] = (rand() % 256) & kk;
       break;
-    case 0xD: { // DRAW Vx, Vy, nibble
+    case 0xD: { // DRW Vx, Vy, nibble
       // Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
       // The interpreter reads n bytes from memory, starting at the address stored in I. 
       // These bytes are then displayed as sprites on screen at coordinates (Vx, Vy).
@@ -473,8 +441,6 @@ void c8_cycle(C8Emu *c8) {
           }
         }
       }
-
-      c8->monitor.redraw = 1;
     } break;
     case 0xE: {
       switch (kk) {
@@ -577,6 +543,7 @@ C8Emu c8_init(C8Params params) {
 
   c8.clock.cpu.freq = params.cpu_freq;
   c8.clock.timers.freq = params.timers_freq;
+  c8.clock.display.freq = params.display_freq;
   
   // Load sprites into memory
   ldbuf(c8.mem, SPRITES_LOCATION_ADDR, SPRITES, sizeof(SPRITES));
@@ -628,13 +595,14 @@ void c8_tick(long now, Clock *clock) {
   }
 }
 
-void c8_update_clock(C8Emu *c8) {
+void c8_update_clocks(C8Emu *c8) {
   struct timespec now_spec = {0};
   clock_gettime(CLOCK_MONOTONIC, &now_spec);
   
   long now = getns(now_spec);
   c8_tick(now, &c8->clock.cpu);
   c8_tick(now, &c8->clock.timers);
+  c8_tick(now, &c8->clock.display);
 }
 
 bool match_opt(const char *arg, const char *option) {
@@ -647,8 +615,20 @@ void c8_print_usage() {
     "  -s <scale>  Set canvas scale (df: 10)\n"
     "  -c <freq>   Change CPU's freq (df: 700)\n"
     "  -t <freq>   Change sound/delay timer's freq (df: 60)\n"
+    "  -d <freq>   Change display freq (df: 60)\n"
+    "  -b          Set black pixel color (df: 000000)\n"
+    "  -w          Set white pixel color (df: FFFFFF)\n"
     "  -h          Show this help dialog\n"
   );
+}
+
+uint32_t strtocolor(const char *s) {
+  if (strlen(s) != 6 || s[strspn(s, "0123456789abcdefABCDEF")] != '\0') {
+    fprintf(stderr, "Error: Malformed color argument, expected 6-digits hexadecimal . Ex: C0FFee, FF0000, 181818\n");
+    exit(1);
+  }
+  
+  return strtol(s, NULL, 16);
 }
 
 C8Params c8_parse_params(int argc, char **argv) {
@@ -663,6 +643,9 @@ C8Params c8_parse_params(int argc, char **argv) {
     .rom_path = argv[argc - 1],
     .cpu_freq = 700,
     .timers_freq = 60,
+    .display_freq = 60,
+    .pixel.black = 0x000000,
+    .pixel.white = 0xFFFFFFF,
   };
 
   // c8 [params, ...] rom.ch8
@@ -675,6 +658,12 @@ C8Params c8_parse_params(int argc, char **argv) {
       params.cpu_freq = strtol(v, NULL, 10);
     } else if (match_opt(opt, "-t")) {
       params.timers_freq = strtol(v, NULL, 10);
+    } else if (match_opt(opt, "-d")) {
+      params.display_freq = strtol(v, NULL, 10);
+    } else if (match_opt(opt, "-b")) {
+      params.pixel.black = strtocolor(v);
+    } else if (match_opt(opt, "-w")) {
+      params.pixel.white = strtocolor(v);
     } else if (match_opt(opt, "-h")) {
       c8_print_usage();
       exit(0);
@@ -694,7 +683,7 @@ C8Params c8_parse_params(int argc, char **argv) {
 
 void c8_run(C8Emu *c8) {
   while (!c8->should_close) {
-    c8_update_clock(c8);
+    c8_update_clocks(c8);
     c8_backend_pool_events(c8);
     
     if (c8->clock.cpu.tick)
@@ -702,8 +691,9 @@ void c8_run(C8Emu *c8) {
 
     if (c8->clock.timers.tick) 
       c8_update_timers(c8);
-    
-    c8_backend_draw(c8);
+   
+    if (c8->clock.display.tick)
+      c8_backend_draw(c8);
   }
 }
 
