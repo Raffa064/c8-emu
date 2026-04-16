@@ -4,6 +4,9 @@
 #include <raylib.h>
 
 typedef struct {
+  AudioStream stream;
+  short *buffer;
+  float time;
   KeyboardKey keymap[16];
 } RLBackend;
 
