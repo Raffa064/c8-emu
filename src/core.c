@@ -21,7 +21,7 @@ uint16_t read_16(Memory mem, uint16_t addr) {
 }
 
 // Load buffer into memory
-void ldbuf(Memory mem, uint16_t addr, const char *buf, size_t length) {
+void ldbuf(Memory mem, uint16_t addr, const uint8_t *buf, size_t length) {
   for (size_t i = 0; i < length; ++i)
     mem[addr + i] = buf[i];
 
@@ -301,7 +301,7 @@ void c8_load_rom(C8Emu *c8, const char *rom_path) {
   size_t file_size = ftell(f);
   rewind(f);
 
-  char *buf = malloc(file_size);
+  uint8_t *buf = malloc(file_size);
   
   size_t total = 0;
   while (total < file_size) {
