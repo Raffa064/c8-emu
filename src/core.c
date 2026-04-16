@@ -378,7 +378,6 @@ C8Params c8_parse_params(int argc, char **argv) {
 
   C8Params params = {
     .canvas.scale = 10,
-    .rom_path = argv[argc - 1],
     .cpu_freq = 700,
     .timers_freq = 60,
     .display_freq = 60,
@@ -387,29 +386,38 @@ C8Params c8_parse_params(int argc, char **argv) {
   };
 
   // c8 [params, ...] rom.ch8
-  for (int i = 1; i < argc - 1; ++i) {
+  for (int i = 1; i < argc; ++i) {
     char *opt = argv[i];
-      const char *v = argv[++i];
-    if (match_opt(opt, "-s")) {
-      params.canvas.scale = strtol(v, NULL, 10);
-    } else if (match_opt(opt, "-c")) {
-      params.cpu_freq = strtol(v, NULL, 10);
-    } else if (match_opt(opt, "-t")) {
-      params.timers_freq = strtol(v, NULL, 10);
-    } else if (match_opt(opt, "-d")) {
-      params.display_freq = strtol(v, NULL, 10);
-    } else if (match_opt(opt, "-b")) {
-      params.pixel.black = strtocolor(v);
-    } else if (match_opt(opt, "-w")) {
-      params.pixel.white = strtocolor(v);
-    } else if (match_opt(opt, "-h")) {
-      c8_print_usage();
-      exit(0);
+
+    if (opt[0] == '-') {
+      if (match_opt(opt, "-s")) {
+        params.canvas.scale = strtol(argv[++i], NULL, 10);
+      } else if (match_opt(opt, "-c")) {
+        params.cpu_freq = strtol(argv[++i], NULL, 10);
+      } else if (match_opt(opt, "-t")) {
+        params.timers_freq = strtol(argv[++i], NULL, 10);
+      } else if (match_opt(opt, "-d")) {
+        params.display_freq = strtol(argv[++i], NULL, 10);
+      } else if (match_opt(opt, "-b")) {
+        params.pixel.black = strtocolor(argv[++i]);
+      } else if (match_opt(opt, "-w")) {
+        params.pixel.white = strtocolor(argv[++i]);
+      } else if (match_opt(opt, "-h")) {
+        c8_print_usage();
+        exit(0);
+      } else {
+        c8_print_usage();
+        fprintf(stderr, "Error: Invalid option: %s\n", opt);
+        exit(1);
+      }
     } else {
-      c8_print_usage();
-      fprintf(stderr, "Error: Invalid option: %s\n", opt);
-      exit(1);
+      params.rom_path = opt;
     }
+  }
+
+  if (!params.rom_path) {
+    printf("No selected rom file\n");
+    exit(1);
   }
 
   params.canvas.width  = DISPLAY_WIDTH  * params.canvas.scale;
